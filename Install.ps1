@@ -24,6 +24,8 @@ $TelegrafSha256 = '6b9c59feddd6ae1febcefa1b90a05e5591a226366670ac807e882b3ac3bb1
 $SensorServiceName = 'librehardwaremonitor'
 $SensorServiceDisplayName = 'Telegraf Sensors'
 $PackageId = 'LibreHardwareMonitorLib'
+$SensorTargetFramework = 'net10.0'
+$SensorRuntimeMajorVersion = 10
 $TargetFrameworks = @(
     'net10.0',
     'net9.0',
@@ -466,10 +468,150 @@ function Select-PreferredFramework {
     return $null
 }
 
+function Get-PreferredAssemblyPrefix {
+    param(
+        [Parameter(Mandatory)]
+        $Zip
+    )
+
+    $LibFrameworks = [System.Collections.Generic.List[string]]::new()
+    $RuntimeFrameworks = [System.Collections.Generic.List[string]]::new()
+    foreach ($Entry in $Zip.Entries) {
+        $Name = $Entry.FullName.Replace('\', '/')
+        if ($Name -match '^lib/([^/]+)/[^/]+\.dll$') {
+            $EntryFramework = $Matches[1].ToLowerInvariant()
+            if (-not $LibFrameworks.Contains($EntryFramework)) {
+                $LibFrameworks.Add($EntryFramework)
+            }
+        }
+
+        if ($Name -match '^runtimes/win-x64/lib/([^/]+)/[^/]+\.dll$') {
+            $EntryFramework = $Matches[1].ToLowerInvariant()
+            if (-not $RuntimeFrameworks.Contains($EntryFramework)) {
+                $RuntimeFrameworks.Add($EntryFramework)
+            }
+        }
+    }
+
+    $AvailableFrameworks = [System.Collections.Generic.List[string]]::new()
+    foreach ($EntryFramework in @($RuntimeFrameworks + $LibFrameworks)) {
+        if (-not $AvailableFrameworks.Contains($EntryFramework)) {
+            $AvailableFrameworks.Add($EntryFramework)
+        }
+    }
+
+    $Framework = Select-PreferredFramework -Names @($AvailableFrameworks)
+    if ($null -eq $Framework) {
+        return $null
+    }
+
+    $Prefix = if ($RuntimeFrameworks.Contains($Framework)) { "runtimes/win-x64/lib/$Framework/" } else { "lib/$Framework/" }
+    return [pscustomobject]@{
+        Framework = $Framework
+        Prefix    = $Prefix
+    }
+}
+
+function Get-AssemblyReferenceVersions {
+    param(
+        [Parameter(Mandatory)]
+        $Entry
+    )
+
+    Add-Type -AssemblyName System.Reflection.Metadata
+    $Source = $Entry.Open()
+    try {
+        $Memory = [System.IO.MemoryStream]::new()
+        $Source.CopyTo($Memory)
+    } finally {
+        $Source.Dispose()
+    }
+
+    $Memory.Position = 0
+    $Pe = [System.Reflection.PortableExecutable.PEReader]::new($Memory)
+    try {
+        $Reader = [System.Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($Pe)
+        $Versions = @{}
+        foreach ($Handle in $Reader.AssemblyReferences) {
+            $Reference = $Reader.GetAssemblyReference($Handle)
+            $Versions[$Reader.GetString($Reference.Name)] = $Reference.Version
+        }
+
+        return $Versions
+    } finally {
+        $Pe.Dispose()
+    }
+}
+
+function Test-PackageLoadsOnHost {
+    param(
+        [Parameter(Mandatory)]
+        $Zip
+    )
+
+    $Selected = Get-PreferredAssemblyPrefix -Zip $Zip
+    if ($null -eq $Selected -or $Selected.Framework -ne $SensorTargetFramework) {
+        return $false
+    }
+
+    $HostDirectory = [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
+    foreach ($Entry in $Zip.Entries) {
+        $Name = $Entry.FullName.Replace('\', '/')
+        $IsDirectDll = $Name.StartsWith($Selected.Prefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+            $Name.EndsWith('.dll', [System.StringComparison]::OrdinalIgnoreCase) -and
+            -not $Name.Substring($Selected.Prefix.Length).Contains('/')
+        if (-not $IsDirectDll) {
+            continue
+        }
+
+        foreach ($Reference in (Get-AssemblyReferenceVersions -Entry $Entry).GetEnumerator()) {
+            if ($Reference.Value.Major -gt $SensorRuntimeMajorVersion) {
+                return $false
+            }
+
+            $HostPath = Join-Path $HostDirectory ($Reference.Key + '.dll')
+            if (-not (Test-Path -LiteralPath $HostPath)) {
+                continue
+            }
+
+            $HostVersion = [System.Reflection.AssemblyName]::GetAssemblyName($HostPath).Version
+            if ($Reference.Value -gt $HostVersion) {
+                return $false
+            }
+        }
+    }
+
+    return $true
+}
+
 function Resolve-LibreHardwareMonitorVersion {
+    param(
+        [Parameter(Mandatory)]
+        [string]$CacheDirectory
+    )
+
     $Index = Invoke-RestMethod -Uri $NuGetIndexUrl
     $Versions = @($Index.versions)
-    return [string]$Versions[-1]
+    for ($IndexNumber = $Versions.Count - 1; $IndexNumber -ge 0; $IndexNumber--) {
+        $Candidate = [string]$Versions[$IndexNumber]
+        $Nupkg = Get-NuGetPackagePath -Id $PackageId -PackageVersion $Candidate -CacheDirectory $CacheDirectory
+        $Compatible = Invoke-NuGetPackage -Path $Nupkg -Action {
+            param($Zip)
+            Test-PackageLoadsOnHost -Zip $Zip
+        }
+        if ($Compatible) {
+            $Latest = [string]$Versions[-1]
+            if ($Candidate -ne $Latest) {
+                Write-InstallLog -Message "LibreHardwareMonitorLib $Latest is newer than .NET 10. Using $Candidate." -Level Warning
+            }
+
+            return $Candidate
+        }
+
+        Write-InstallLog -Message "Skipping LibreHardwareMonitorLib $Candidate because it is not a .NET 10 build this host can load." -Level Warning
+    }
+
+    throw 'No LibreHardwareMonitorLib version targets .NET 10 on this PowerShell runtime.'
 }
 
 function Get-NuGetPackagePath {
@@ -707,43 +849,25 @@ function Copy-PackageAssemblies {
 
     $Copied = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $Entries = [System.Collections.Generic.List[object]]::new()
-    $Framework = $null
-    $Frameworks = [System.Collections.Generic.List[string]]::new()
-
-    foreach ($Entry in $Zip.Entries) {
-        $Name = $Entry.FullName.Replace('\', '/')
-        if ($Name -match '^lib/([^/]+)/[^/]+\.dll$') {
-            $EntryFramework = $Matches[1].ToLowerInvariant()
-            if (-not $Frameworks.Contains($EntryFramework)) {
-                $Frameworks.Add($EntryFramework)
-            }
-        }
-    }
-
-    $Framework = Select-PreferredFramework -Names $Frameworks
-    if ($null -ne $Framework) {
-        $Prefix = "lib/$Framework/"
+    $Selected = Get-PreferredAssemblyPrefix -Zip $Zip
+    $Framework = if ($null -eq $Selected) { $null } else { $Selected.Framework }
+    if ($null -ne $Selected) {
         foreach ($Entry in $Zip.Entries) {
             $Name = $Entry.FullName.Replace('\', '/')
-            $IsDirectDll = $Name.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+            $IsDirectDll = $Name.StartsWith($Selected.Prefix, [System.StringComparison]::OrdinalIgnoreCase) -and
                 $Name.EndsWith('.dll', [System.StringComparison]::OrdinalIgnoreCase) -and
-                -not $Name.Substring($Prefix.Length).Contains('/')
+                -not $Name.Substring($Selected.Prefix.Length).Contains('/')
             if ($IsDirectDll) {
                 $Entries.Add($Entry)
             }
         }
     }
 
-    $Runtime = [System.Collections.Generic.List[object]]::new()
     foreach ($Entry in $Zip.Entries) {
         $Name = $Entry.FullName.Replace('\', '/')
-        if ($Name -match '^runtimes/win-x64/.+\.dll$') {
-            $Runtime.Add($Entry)
+        if ($Name -match '^runtimes/win-x64/native/.+\.dll$') {
+            $Entries.Add($Entry)
         }
-    }
-
-    foreach ($Entry in ($Runtime | Sort-Object { [int]$_.FullName.Replace('\', '/').Contains('/native/') })) {
-        $Entries.Add($Entry)
     }
 
     foreach ($Entry in $Entries) {
@@ -765,7 +889,7 @@ function Resolve-SensorPackages {
     )
 
     Write-InstallLog -Message 'Resolving NuGet packages'
-    $ResolvedVersion = Resolve-LibreHardwareMonitorVersion
+    $ResolvedVersion = Resolve-LibreHardwareMonitorVersion -CacheDirectory $CacheDirectory
 
     $Selected = @{}
     $Pending = [System.Collections.Generic.Queue[object]]::new()
@@ -873,11 +997,13 @@ function Install-SensorPackages {
             Copy-PackageAssemblies -Zip $Zip -Destination $LibDirectory
         }
         $CopiedCount = $Extracted.Count
+        $PackageFramework = [string]$Extracted.Framework
         if ($Package.Id.Equals($PackageId, [System.StringComparison]::OrdinalIgnoreCase)) {
-            $InstalledFramework = [string]$Extracted.Framework
+            $InstalledFramework = $PackageFramework
         }
 
-        Write-InstallLog -Message "Extracted $($Package.Id) $($Package.Version) ($CopiedCount)" -Level Success
+        $FrameworkText = if ([string]::IsNullOrWhiteSpace($PackageFramework)) { 'no target framework' } else { $PackageFramework }
+        Write-InstallLog -Message "Extracted $($Package.Id) $($Package.Version) $FrameworkText ($CopiedCount)" -Level Success
         $ManifestPackages.Add([pscustomobject]@{
             id      = $Package.Id
             version = $Package.Version

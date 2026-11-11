@@ -30,7 +30,7 @@ These scripts publish hardware readings to Telegraf without opening LibreHardwar
 pwsh -NoProfile -ExecutionPolicy Bypass -File "<install>\Install.ps1"
 ```
 
-The installer always downloads the latest LibreHardwareMonitorLib from NuGet, including prerelease. That resolution on every run is intentional. It selects the first available target framework from `net10.0` down to `netstandard2.0`, then walks the dependencies of that group. Each package is downloaded at the minimum version the nuspec declares. Resolved ids, versions, and the framework selected for LibreHardwareMonitorLib are written to `runtime\lhm\install-manifest.json`.
+The installer stays on .NET 10. It downloads the latest LibreHardwareMonitorLib from NuGet, including prerelease, whose Windows build targets `net10.0` and whose runtime references are not newer than .NET 10. A .NET 11 build is skipped. That resolution on every run is intentional. Dependencies use the first available target framework from `net10.0` down to `netstandard2.0`, then the installer walks the dependencies of that group. Each package is downloaded at the minimum version the nuspec declares. Resolved ids, versions, and the framework selected for LibreHardwareMonitorLib are written to `runtime\lhm\install-manifest.json`.
 
 A second run updates the service that is already registered and starts it when it is stopped. The installer starts `librehardwaremonitor` before it configures `telegraf`, and sets `telegraf` to depend on this service.
 

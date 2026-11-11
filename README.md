@@ -16,7 +16,7 @@ Windows collectors published through Telegraf. Telegraf's usual setup is a `tele
 | `system\` | One-shot Windows and BIOS collector. See `system/README.md`. |
 | `sensors\` | Resident hardware sampler and its reader. See `sensors/README.md`. |
 
-`Install.ps1` downloads NSSM `2.24-101-g897c7ad` and Telegraf `1.38.2`. LibreHardwareMonitorLib is the latest NuGet package, including prerelease. PawnIO is the latest GitHub release when the installed driver is missing or older. Resolving those two on every run is intentional. `runtime\lhm\install-manifest.json` records the package versions that run installed and the framework selected for LibreHardwareMonitorLib.
+`Install.ps1` downloads NSSM `2.24-101-g897c7ad` and Telegraf `1.38.2`. LibreHardwareMonitorLib stays on .NET 10. The installer takes the latest package, including prerelease, whose Windows build targets `net10.0` and whose runtime references are not newer than .NET 10. A .NET 11 build is skipped. PawnIO is the latest GitHub release when the installed driver is missing or older. Resolving those two on every run is intentional. `runtime\lhm\install-manifest.json` records the package versions that run installed and the framework selected for LibreHardwareMonitorLib.
 
 ## Prerequisites
 
