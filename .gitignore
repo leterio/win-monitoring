@@ -1,0 +1,22 @@
+# Editors
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+~$*
+
+# Binaries downloaded by Install.ps1
+runtime/
+
+# Local environment read by Start-Telegraf.ps1
+.env
+
+# Sensor snapshot. Libraries and watcher logs live under runtime/.
+sensors/sensors.metrics.line
+sensors/sensors.metrics.line.tmp
