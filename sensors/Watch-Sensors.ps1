@@ -103,11 +103,16 @@ function New-SensorMetric {
         [string]$HardwareType
     )
 
+    $NumericValue = [double]$Value
+    if ([double]::IsNaN($NumericValue)) {
+        return $null
+    }
+
     return ($SensorMetricTemplate -f `
         (Format-LineProtocolIdentifier $Device),
         (Format-LineProtocolIdentifier $Type),
         (Format-LineProtocolIdentifier $Name),
-        (Format-LineProtocolNumber -Value ([double]$Value)),
+        (Format-LineProtocolNumber -Value $NumericValue),
         (Format-LineProtocolIdentifier $HardwareType))
 }
 
@@ -272,18 +277,31 @@ function Get-SensorMetrics {
         $Name = $Sensor.Name
         $Value = [double]$Sensor.Value
 
+        if ([double]::IsNaN($Value)) {
+            continue
+        }
+
         if ($Type -eq 'Temperature') {
             Add-TemperatureValue -Map $TemperatureMap -Device $DeviceName -Value $Value -HardwareType $HardwareType
         }
 
-        $Metrics.Add((New-SensorMetric -Device $DeviceName -Type $Type -Name $Name -Value $Value -HardwareType $HardwareType))
+        $Metric = New-SensorMetric -Device $DeviceName -Type $Type -Name $Name -Value $Value -HardwareType $HardwareType
+        if ($null -ne $Metric) {
+            $Metrics.Add($Metric)
+        }
     }
 
     foreach ($Entry in $TemperatureMap.GetEnumerator()) {
         $Average = ($Entry.Value['Values'] | Measure-Object -Average).Average
-        $HardwareType = $Entry.Value['HardwareType']
+        if ($null -eq $Average -or [double]::IsNaN([double]$Average)) {
+            continue
+        }
 
-        $Metrics.Add((New-SensorMetric -Device $Entry.Key -Type 'Temperature' -Name 'Average' -Value $Average -HardwareType $HardwareType))
+        $HardwareType = $Entry.Value['HardwareType']
+        $Metric = New-SensorMetric -Device $Entry.Key -Type 'Temperature' -Name 'Average' -Value $Average -HardwareType $HardwareType
+        if ($null -ne $Metric) {
+            $Metrics.Add($Metric)
+        }
     }
 
     return $Metrics
